@@ -99,6 +99,10 @@ function parseUtmFile(file) {
         resolve(res.data.map((r) => ({
           date: r.date,
           channel: r.channel ? String(r.channel).trim() : null,
+          medium: r.medium ? String(r.medium).trim() : null,
+          campaign: r.campaign ? String(r.campaign).trim() : null,
+          content: r.content ? String(r.content).trim() : null,
+          term: r.term ? String(r.term).trim() : null,
           orderAmount: Number(r.order_amount) || 0,
           orderCount: Number(r.order_count) || 0,
           inflowCount: Number(r.inflow_count) || 0,
@@ -346,7 +350,7 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevM
 }
 
 function rowKeyMeta(r) { return r.code + "|" + r.date; }
-function rowKeyUtm(r) { return (r.channel || "") + "|" + r.date + "|" + (r.campaign || "") + "|" + (r.content || ""); }
+function rowKeyUtm(r) { return (r.channel || "") + "|" + r.date + "|" + (r.medium || "") + "|" + (r.campaign || "") + "|" + (r.content || "") + "|" + (r.term || ""); }
 
 // 기존 히스토리 + 새로 업로드한 데이터를 날짜+코드 기준으로 합칩니다.
 // 같은 날짜/소재가 다시 올라오면 최신 업로드 값으로 덮어씁니다 (중복 합산 방지).
