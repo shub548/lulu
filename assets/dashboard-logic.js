@@ -350,15 +350,44 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevM
 }
 
 function rowKeyMeta(r) { return r.code + "|" + r.date; }
-function rowKeyUtm(r) { return (r.channel || "") + "|" + r.date + "|" + (r.medium || "") + "|" + (r.campaign || "") + "|" + (r.content || "") + "|" + (r.term || ""); }
 
-// 기존 히스토리 + 새로 업로드한 데이터를 날짜+코드 기준으로 합칩니다.
-// 같은 날짜/소재가 다시 올라오면 최신 업로드 값으로 덮어씁니다 (중복 합산 방지).
+// 메타(지출) 데이터 병합: 날짜가 항상 명확한 일자 단위라 코드+날짜 키로 정확히 매칭/교체 가능
 function mergeRows(existingRows, newRows, keyFn) {
   const map = new Map();
   for (const r of (existingRows || [])) map.set(keyFn(r), r);
   for (const r of (newRows || [])) map.set(keyFn(r), r);
   return [...map.values()];
+}
+
+// 날짜 값이 "2026-07-01" 같은 단일 날짜인지, "2026-07-01 ~ 2026-07-18" 같은 범위인지 파싱해서 [시작,끝]을 반환
+function parseDateSpan(dateStr) {
+  if (!dateStr) return [null, null];
+  const parts = String(dateStr).split("~").map((s) => s.trim());
+  if (parts.length === 2 && parts[0] && parts[1]) return [parts[0], parts[1]];
+  return [dateStr, dateStr];
+}
+function spansOverlap(s1, e1, s2, e2) {
+  if (!s1 || !e1 || !s2 || !e2) return false;
+  return s1 <= e2 && e1 >= s2;
+}
+
+// UTM 데이터 전용 병합: 날짜 표기 형식(일자별 vs 기간집계)이 다른 파일끼리 겹치는 기간을 올릴 때
+// 같은 매출이 이중으로 쌓이는 걸 막기 위해, 새로 올라온 파일이 커버하는 기간과 겹치는 기존 행은
+// 전부 제거하고 새 데이터로 통째로 교체합니다 (행 단위 키 매칭 대신 "기간 단위 교체").
+function mergeUtmRowsByPeriod(existingRows, newRows) {
+  if (!newRows || !newRows.length) return existingRows || [];
+  let newStart = null, newEnd = null;
+  for (const r of newRows) {
+    const [s, e] = parseDateSpan(r.date);
+    if (!s || !e) continue;
+    if (newStart === null || s < newStart) newStart = s;
+    if (newEnd === null || e > newEnd) newEnd = e;
+  }
+  const survivors = (existingRows || []).filter((r) => {
+    const [s, e] = parseDateSpan(r.date);
+    return !spansOverlap(s, e, newStart, newEnd);
+  });
+  return [...survivors, ...newRows];
 }
 
 function shiftDate(dateStr, days) {
