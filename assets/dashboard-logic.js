@@ -93,6 +93,8 @@ function parseUtmFile(file) {
       header: true,
       dynamicTyping: true,
       skipEmptyLines: true,
+      // 카페24 CSV 앞에 붙는 BOM(﻿) 문자 때문에 "date" 컬럼명이 깨지는 문제 방지
+      transformHeader: (h) => h.replace(/^\uFEFF/, "").trim(),
       complete: (res) => {
         resolve(res.data.map((r) => ({
           date: r.date,
