@@ -122,8 +122,10 @@ previewBtn.addEventListener("click", async () => {
     // 기본 보기 기간은 "이번에 새로 올린 파일의 기간"
     const [mS, mE] = dateRangeOf(newMetaRows);
     const [uS, uE] = dateRangeOf(newUtmRows);
-    const dateStart = mS && uS ? (mS > uS ? mS : uS) : (mS || uS);
-    const dateEnd = mE && uE ? (mE < uE ? mE : uE) : (mE || uE);
+    // 기본 조회기간은 "이번에 올린 메타 지출 파일의 기간" 기준으로 잡습니다.
+    // (카페24 파일의 날짜 범위와 정확히 안 겹칠 수 있어서, 교집합으로 잡으면 기간이 부당하게 좁아질 수 있음)
+    const dateStart = mS || uS;
+    const dateEnd = mE || uE;
 
     const uploader = document.getElementById("uploaderInput").value || "익명";
     const savedAt = new Date().toISOString();
