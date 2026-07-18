@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>룰루피치 광고 판정 대시보드</title>
 <link rel="stylesheet" href="assets/style.css">
+<style>
+.controls{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 18px;margin-bottom:14px;display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;font-size:12.5px;}
+.controls .grp label{display:block;color:var(--sub);font-size:11.5px;margin-bottom:4px;}
+.controls input[type=date]{border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12.5px;}
+.controls .chk-group{display:flex;gap:10px;flex-wrap:wrap;max-width:280px;}
+.controls .chk-group label{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--ink);white-space:nowrap;}
+</style>
 </head>
 <body>
 <header>
@@ -14,6 +21,29 @@
   </div>
 </header>
 <main>
+  <div id="controls" class="controls" style="display:none">
+    <div class="grp">
+      <label>시작일</label>
+      <input type="date" id="dateStart">
+    </div>
+    <div class="grp">
+      <label>종료일</label>
+      <input type="date" id="dateEnd">
+    </div>
+    <div class="grp">
+      <label>매체</label>
+      <div class="chk-group" id="mediaChecks"></div>
+    </div>
+    <div class="grp">
+      <label>판정</label>
+      <div class="chk-group" id="verdictChecks"></div>
+    </div>
+    <div class="grp">
+      <label><input type="checkbox" id="compareChk"> 이전 동일기간과 비교</label>
+    </div>
+    <button class="pri" id="applyBtn">적용</button>
+    <button class="sec" id="resetBtn">초기화</button>
+  </div>
   <div id="root">
     <div class="empty-state">불러오는 중...</div>
   </div>
@@ -21,15 +51,57 @@
 
 <script src="assets/dashboard-logic.js"></script>
 <script>
+const VERDICT_LABELS = { focus: "🔼 집중", keep: "➡️ 유지", watch: "🟡 관찰", cut: "🔽 축소", stop: "⛔ 중단" };
+let state = null;
+const root = document.getElementById("root");
+const controls = document.getElementById("controls");
+
+function buildChecks(container, items, prefix) {
+  container.innerHTML = items.map((v) => `
+    <label><input type="checkbox" class="${prefix}-chk" value="${v.value}">${v.label}</label>`).join("");
+}
+
+function currentView() {
+  const mediaChecked = [...document.querySelectorAll(".media-chk:checked")].map((el) => el.value);
+  const verdictChecked = [...document.querySelectorAll(".verdict-chk:checked")].map((el) => el.value);
+  return {
+    dateStart: document.getElementById("dateStart").value || state.dateStart,
+    dateEnd: document.getElementById("dateEnd").value || state.dateEnd,
+    mediaFilter: mediaChecked.length ? new Set(mediaChecked) : null,
+    verdictFilter: verdictChecked.length ? new Set(verdictChecked) : null,
+    compare: document.getElementById("compareChk").checked,
+  };
+}
+
 (async function () {
-  const root = document.getElementById("root");
   const sub = document.getElementById("header-sub");
   try {
     const res = await fetch("data.json?t=" + Date.now());
     if (!res.ok) throw new Error("no data");
-    const state = await res.json();
+    state = await res.json();
     sub.textContent = "읽기 전용 · 관리자 페이지(admin.html)에서 데이터를 갱신할 수 있습니다";
-    renderDashboard(root, state);
+
+    const fullRange = dateRangeOf(state.metaRows);
+    document.getElementById("dateStart").value = state.dateStart;
+    document.getElementById("dateEnd").value = state.dateEnd;
+    document.getElementById("dateStart").min = fullRange[0];
+    document.getElementById("dateEnd").max = fullRange[1];
+
+    const mediaSet = new Set(state.metaRows.map((r) => classifyMedia(r.code)));
+    buildChecks(document.getElementById("mediaChecks"), [...mediaSet].map((v) => ({ value: v, label: v })), "media");
+    buildChecks(document.getElementById("verdictChecks"), Object.entries(VERDICT_LABELS).map(([value, label]) => ({ value, label })), "verdict");
+
+    controls.style.display = "flex";
+    renderDashboard(root, state, currentView());
+
+    document.getElementById("applyBtn").addEventListener("click", () => renderDashboard(root, state, currentView()));
+    document.getElementById("resetBtn").addEventListener("click", () => {
+      document.getElementById("dateStart").value = state.dateStart;
+      document.getElementById("dateEnd").value = state.dateEnd;
+      document.querySelectorAll(".media-chk, .verdict-chk").forEach((el) => el.checked = false);
+      document.getElementById("compareChk").checked = false;
+      renderDashboard(root, state, currentView());
+    });
   } catch (e) {
     sub.textContent = "";
     root.innerHTML = '<div class="empty-state">아직 업로드된 데이터가 없습니다.<br>관리자에게 데이터 업로드를 요청해주세요. (admin.html)</div>';
