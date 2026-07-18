@@ -2,19 +2,25 @@
    index.html(팀 전체 보기)과 admin.html(업로드) 양쪽에서 그대로 사용합니다. */
 
 var DEFAULT_SETTINGS = {
-  weightRoas: 0.7,
-  weightInflowValue: 0.3,
+  // 종합지수 가중치 — "전환이 검증된 소재"에는 실ROAS 비중을 훨씬 높게 둠 (전환=최우선 원칙)
+  weightRoasVerified: 0.85,
+  weightInflowValueVerified: 0.15,
   thFocus: 2.0,
   thKeep: 1.0,
   thCut: 0.7,
-  cpaCapMultiplier: 3,
-  inflowCostOutlierMultiplier: 3,
-  noRevenueSpendMultiplier: 1.5,
-  watchInflowCostRatio: 0.5,
+  cpaCapWon: 58000,              // 전환당비용 상한 (원본 리포트에서 역산된 고정값)
+  inflowCostOutlierMultiplier: 3, // 유입단가 이상치 = 평균 × N
+  noRevenueSpendWon: 100000,      // 무매출 허용선 (고정값, 평균 배수 아님)
+  watchInflowCostRatio: 0.5,      // 소액관찰 유입단가 기준 = 평균 × N
   rankCap: 30,
   focusIncreasePct: 25,
   cutReducePct: 45,
   perCreativeCapPct: 50,
+  // 신규: 표본 부족 필터 — 이 미만이면 종합지수가 높아도 "집중"을 못 받음
+  minInflowForFocus: 20,
+  minOrdersForFocus: 2,
+  // 신규: 모멘텀(연속 부진 격상) / 피로도 경고
+  fatigueDropRatio: 0.4, // 실ROAS가 전기간 대비 40% 이상 하락하면 피로 경고
 };
 
 const BADGE_STYLES = {
@@ -72,6 +78,8 @@ async function parseMetaFile(file) {
   return rows.map((r) => ({
     date: excelDateToStr(r["보고 시작"]),
     adName: r["광고 이름"],
+    campaign: r["캠페인 이름"] || null,
+    adset: r["광고 세트 이름"] || null,
     code: extractCode(r["광고 이름"]),
     spend: Number(r["지출 금액 (KRW)"]) || 0,
     purchases: Number(r["구매"]) || 0,
@@ -123,16 +131,20 @@ function avg(arr) {
   return clean.reduce((s, n) => s + n, 0) / clean.length;
 }
 
-function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings) {
+function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevMap) {
   const metaInRange = metaRows.filter((r) => inRange(r.date, dateStart, dateEnd));
   const utmInRange = utmRows.filter((r) => inRange(r.date, dateStart, dateEnd));
 
   const metaAgg = new Map();
   for (const r of metaInRange) {
-    const cur = metaAgg.get(r.code) || { spend: 0, purchases: 0, purchaseValue: 0, adName: r.adName };
+    const cur = metaAgg.get(r.code) || { spend: 0, purchases: 0, purchaseValue: 0, adName: r.adName, campaign: r.campaign, adset: r.adset };
     cur.spend += r.spend;
     cur.purchases += r.purchases;
     cur.purchaseValue += r.purchaseValue;
+    // 최신 행의 이름/캠페인/세트 정보로 갱신 (기간 내 마지막 값 사용)
+    cur.adName = r.adName || cur.adName;
+    cur.campaign = r.campaign || cur.campaign;
+    cur.adset = r.adset || cur.adset;
     metaAgg.set(r.code, cur);
   }
 
@@ -172,38 +184,80 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings) {
     const revenuePerInflow = inflow > 0 ? revenue / inflow : 0;
     const realRoas = spend > 0 ? revenue / spend : 0;
     const inflowValue = spend > 0 ? (inflow * siteAvgRevenuePerInflow) / spend : 0;
-    const composite = realRoas * settings.weightRoas + inflowValue * settings.weightInflowValue;
+    const verified = revenue > 0; // 전환(매출)이 실제로 확인된 소재인지
+    // 전환이 검증된 소재는 실ROAS 비중을 훨씬 높게, 미검증 소재는 유입가치로만 판단
+    const composite = verified
+      ? realRoas * settings.weightRoasVerified + inflowValue * settings.weightInflowValueVerified
+      : inflowValue;
     const cpa = orders > 0 ? spend / orders : null;
-    creatives.push({ code, adName: m.adName, media: classifyMedia(code), spend, mediaRoas, inflow, inflowCost, revenuePerInflow, revenue, realRoas, inflowValue, composite, orders, cpa });
+    creatives.push({
+      code, adName: m.adName, campaign: m.campaign, adset: m.adset, media: classifyMedia(code),
+      spend, mediaRoas, inflow, inflowCost, revenuePerInflow, revenue, realRoas, inflowValue,
+      composite, orders, cpa, verified,
+    });
   }
 
   const spendCreatives = creatives.filter((c) => c.spend > 0);
   const avgInflowCost = avg(spendCreatives.filter((c) => c.inflowCost !== null).map((c) => c.inflowCost));
-  const avgSpend = avg(spendCreatives.map((c) => c.spend));
-  const avgCpa = avg(spendCreatives.filter((c) => c.cpa !== null).map((c) => c.cpa));
 
   const warnings = [];
+  const fatigueWarnings = [];
   for (const c of creatives) {
     const reasons = [];
     let verdict;
+    let sampleLimited = false;
+
     if (c.inflow === 0) {
       verdict = "stop"; reasons.push("유입 0 — UTM 세팅 점검");
-    } else if (c.revenue === 0 && c.spend > avgSpend * settings.noRevenueSpendMultiplier) {
-      verdict = "stop"; reasons.push("무매출 + 지출 과다");
-    } else if (c.cpa !== null && avgCpa > 0 && c.cpa > avgCpa * settings.cpaCapMultiplier) {
-      verdict = "stop"; reasons.push("전환당 비용 상한 초과");
-    } else if (c.inflowCost !== null && avgInflowCost > 0 && c.inflowCost > avgInflowCost * settings.inflowCostOutlierMultiplier && c.realRoas < 1) {
-      verdict = "stop"; reasons.push(`유입단가 평균 ${settings.inflowCostOutlierMultiplier}배↑`);
+    } else if (c.revenue === 0 && c.spend > settings.noRevenueSpendWon) {
+      verdict = "cut";
+      reasons.push(`실매출 0인데 지출 ${fmtWon(c.spend)} — 무매출 허용선(${fmtWon(settings.noRevenueSpendWon)}) 초과. −${settings.cutReducePct}% 후 차주 재평가`);
     } else if (c.revenue === 0 && c.inflowCost !== null && avgInflowCost > 0 && c.inflowCost <= avgInflowCost * settings.watchInflowCostRatio) {
-      verdict = "watch"; reasons.push(`아직 매출은 없지만 유입단가 ₩${fmtNum(c.inflowCost)}로 평균의 절반 이하 — 관찰 필요`);
+      verdict = "watch";
+      reasons.push(`아직 매출은 없지만 유입단가 ${fmtWon(c.inflowCost)}로 평균의 절반 이하 — 관찰 필요`);
+    } else if (c.cpa !== null && c.cpa > settings.cpaCapWon) {
+      verdict = "stop";
+      reasons.push(`전환 1건 비용 ${fmtWon(c.cpa)} — 상한(${fmtWon(settings.cpaCapWon)}) 초과`);
+    } else if (c.inflowCost !== null && avgInflowCost > 0 && c.inflowCost > avgInflowCost * settings.inflowCostOutlierMultiplier && c.realRoas < 1) {
+      verdict = "stop";
+      reasons.push(`유입단가 ${fmtWon(c.inflowCost)} — 전체 평균(${fmtWon(avgInflowCost)})의 ${settings.inflowCostOutlierMultiplier}배 초과, 매출로도 회수 못함`);
     } else {
       if (c.composite >= settings.thFocus) verdict = "focus";
       else if (c.composite >= settings.thKeep) verdict = "keep";
       else if (c.composite >= settings.thCut) verdict = "cut";
       else verdict = "stop";
-      reasons.push(`종합지수 ${fmtNum(c.composite, 2)} 기준 판정`);
+      reasons.push(`종합지수 ${fmtNum(c.composite, 2)} 기준 판정${c.verified ? "" : " (미검증 · 유입가치 기준)"}`);
+
+      // 표본 부족 필터: 유입/주문이 너무 적으면 "집중"은 못 받음 (우연한 대박 방지)
+      if (verdict === "focus" && (c.inflow < settings.minInflowForFocus || c.orders < settings.minOrdersForFocus)) {
+        verdict = "keep";
+        sampleLimited = true;
+        reasons.push(`표본 부족(유입 ${c.inflow}/${settings.minInflowForFocus}, 주문 ${c.orders}/${settings.minOrdersForFocus}) — 집중 보류, 유지로 조정`);
+      }
+      // 미검증(매출 미발생) 소재는 유입가치가 아무리 높아도 "집중"까지는 못 감
+      if (verdict === "focus" && !c.verified) {
+        verdict = "keep";
+        reasons.push("미검증(매출 미발생) — 유입가치만으로는 집중 불가, 유지로 조정");
+      }
     }
+
+    // 모멘텀: 지난 기간에도 부진했는데 이번에도 부진하면 한 단계 격상 (2주 연속 부진 시 중단)
+    if (prevMap && prevMap.has(code)) {
+      const prev = prevMap.get(code);
+      if (verdict === "cut" && (prev.verdict === "cut" || prev.verdict === "stop")) {
+        reasons.push(`지난 기간(${prev.verdict === "cut" ? "축소" : "중단"})에 이어 이번 기간도 부진 — 중단으로 격상`);
+        verdict = "stop";
+      } else if (prev.verdict === "watch" && c.revenue > 0) {
+        reasons.push("지난 기간 관찰 소재 — 이번 기간 첫 매출 발생 확인");
+      }
+      // 피로도 경고: 실ROAS가 전기간 대비 크게 하락 (판정 자체는 바꾸지 않고 경고만)
+      if (prev.realRoas > 0 && c.realRoas < prev.realRoas * (1 - settings.fatigueDropRatio) && (verdict === "focus" || verdict === "keep")) {
+        fatigueWarnings.push({ code, from: prev.realRoas, to: c.realRoas });
+      }
+    }
+
     c.verdict = verdict;
+    c.sampleLimited = sampleLimited;
     c.reason = reasons.join(" · ");
     if (verdict === "stop" && !reasons[0].startsWith("종합지수")) warnings.push({ code: c.code, reason: reasons[0] });
   }
@@ -218,7 +272,7 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings) {
       c.note = c.verdict === "stop" ? "판정 중단" : `순위 ${c.rank}위 — 상한(${settings.rankCap}개) 밖, 선택과 집중 컷`;
     } else if (c.verdict === "focus") {
       c.proposedBudget = c.spend * (1 + settings.focusIncreasePct / 100);
-      c.note = `집중 배정 +${settings.focusIncreasePct}%`;
+      c.note = `집중 배정 +${settings.focusIncreasePct}% (검증된 전환)`;
     } else if (c.verdict === "cut") {
       c.proposedBudget = c.spend * (1 - settings.cutReducePct / 100);
       c.note = `축소 −${settings.cutReducePct}%`;
@@ -230,22 +284,30 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings) {
   const sumBefore = ranked.reduce((s, c) => s + c.proposedBudget, 0);
   let remaining = totalPool - sumBefore;
   if (remaining > 0) {
-    let pool = ranked.filter((c) => c.rank <= settings.rankCap && c.verdict !== "stop")
-      .map((c) => ({ c, cap: c.spend * (1 + settings.perCreativeCapPct / 100) }));
-    for (let iter = 0; iter < 4 && remaining > 1 && pool.length; iter++) {
-      const wSum = pool.reduce((s, p) => s + Math.max(p.c.composite, 0.01), 0);
-      const next = [];
-      let distributed = 0;
-      for (const p of pool) {
-        const share = remaining * (Math.max(p.c.composite, 0.01) / wSum);
-        const room = Math.max(p.cap - p.c.proposedBudget, 0);
-        const add = Math.min(share, room);
-        p.c.proposedBudget += add;
-        distributed += add;
-        if (room - add > 1) next.push(p);
+    // 검증된 전환(집중 등급)을 최우선으로 배분하고, 그 다음에야 유지 등급으로 넘어감
+    // (전환=최우선 원칙 반영: 미검증/유지 소재보다 실매출 확인된 소재를 우대)
+    const tiers = [
+      ranked.filter((c) => c.rank <= settings.rankCap && c.verdict === "focus"),
+      ranked.filter((c) => c.rank <= settings.rankCap && c.verdict === "keep"),
+    ];
+    for (const tier of tiers) {
+      if (remaining <= 1) break;
+      let pool = tier.map((c) => ({ c, cap: c.spend * (1 + settings.perCreativeCapPct / 100) }));
+      for (let iter = 0; iter < 4 && remaining > 1 && pool.length; iter++) {
+        const wSum = pool.reduce((s, p) => s + Math.max(p.c.composite, 0.01), 0);
+        const next = [];
+        let distributed = 0;
+        for (const p of pool) {
+          const share = remaining * (Math.max(p.c.composite, 0.01) / wSum);
+          const room = Math.max(p.cap - p.c.proposedBudget, 0);
+          const add = Math.min(share, room);
+          p.c.proposedBudget += add;
+          distributed += add;
+          if (room - add > 1) next.push(p);
+        }
+        remaining -= distributed;
+        pool = next;
       }
-      remaining -= distributed;
-      pool = next;
     }
   }
   for (const c of ranked) {
@@ -272,8 +334,11 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings) {
   const topSpendChart = [...creatives].sort((a, b) => b.spend - a.spend).slice(0, 12)
     .map((c) => ({ name: c.code, spend: c.spend, revenue: c.revenue }));
 
+  // 다음 기간 모멘텀/피로도 판단에 쓰일 수 있도록 코드별 판정 요약 맵도 함께 반환
+  const verdictMap = new Map(creatives.map((c) => [c.code, { verdict: c.verdict, realRoas: c.realRoas }]));
+
   return {
-    creatives: ranked, missingSpend, warnings, badgeCounts, mediaBreakdown, topSpendChart,
+    creatives: ranked, missingSpend, warnings, fatigueWarnings, badgeCounts, mediaBreakdown, topSpendChart, verdictMap,
     kpi: { totalSpend, totalRevenue, realRoasTotal, totalInflow, inflowCostAvgTotal, overReportRatio, nextBudgetTotal, siteAvgRevenuePerInflow },
   };
 }
@@ -415,6 +480,16 @@ function donutChartSvg(data) {
   </div>`;
 }
 
+function creativeLabelHtml(c) {
+  const campaign = c.campaign ? esc(c.campaign) : "";
+  const adset = c.adset ? esc(c.adset) : "";
+  const name = c.adName ? esc(c.adName) : esc(c.code);
+  return `<div style="line-height:1.4">
+    ${campaign || adset ? `<div style="font-size:10px;color:#94a3b8">${campaign}${campaign && adset ? " › " : ""}${adset}</div>` : ""}
+    <div style="font-weight:600">${name}</div>
+  </div>`;
+}
+
 function renderDashboard(root, state, view) {
   const { metaRows, utmRows, settings, uploader, savedAt } = state;
   if (!metaRows || !utmRows) {
@@ -428,14 +503,13 @@ function renderDashboard(root, state, view) {
   const verdictFilter = view.verdictFilter || null; // Set|null
   const compare = !!view.compare;
 
-  const d = computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings);
+  // 모멘텀/피로도 판단용 — "이전 동일기간과 비교" 표시 여부와 무관하게 항상 계산합니다.
+  const [pStart, pEnd] = previousPeriod(dateStart, dateEnd);
+  const prevDashboard = computeDashboard(metaRows, utmRows, pStart, pEnd, settings);
+  const d = computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevDashboard.verdictMap);
   const trend = computeDailyTrend(metaRows, utmRows, dateStart, dateEnd);
 
-  let cmp = null;
-  if (compare) {
-    const [pStart, pEnd] = previousPeriod(dateStart, dateEnd);
-    cmp = { range: [pStart, pEnd], d: computeDashboard(metaRows, utmRows, pStart, pEnd, settings) };
-  }
+  const cmp = compare ? { range: [pStart, pEnd], d: prevDashboard } : null;
 
   root.dataset.sortKey = root.dataset.sortKey || "composite";
   root.dataset.sortDir = root.dataset.sortDir || "desc";
@@ -456,7 +530,7 @@ function renderDashboard(root, state, view) {
   const kpiHtml = `
     <div class="kpi-grid">
       <div class="kpi"><div class="l">총 지출</div><div class="v">${fmtWon(d.kpi.totalSpend)}</div>${cmp ? deltaHtml(d.kpi.totalSpend, cmp.d.kpi.totalSpend, { goodIsUp: false }) : ""}</div>
-      <div class="kpi"><div class="l">UTM 실매출</div><div class="v">${fmtWon(d.kpi.totalRevenue)}</div>${cmp ? deltaHtml(d.kpi.totalRevenue, cmp.d.kpi.totalRevenue) : ""}</div>
+      <div class="kpi"><div class="l">실매출(UTM)</div><div class="v">${fmtWon(d.kpi.totalRevenue)}</div>${cmp ? deltaHtml(d.kpi.totalRevenue, cmp.d.kpi.totalRevenue) : ""}</div>
       <div class="kpi"><div class="l">실ROAS</div><div class="v" style="color:${d.kpi.realRoasTotal < 1 ? "#dc2626" : "#059669"}">${fmtNum(d.kpi.realRoasTotal, 2)}</div>${cmp ? deltaHtml(d.kpi.realRoasTotal, cmp.d.kpi.realRoasTotal) : ""}</div>
       <div class="kpi"><div class="l">총 유입 / 유입단가</div><div class="v">${fmtNum(d.kpi.totalInflow)} / ${fmtWon(d.kpi.inflowCostAvgTotal)}</div>${cmp ? deltaHtml(d.kpi.totalInflow, cmp.d.kpi.totalInflow) : ""}</div>
       <div class="kpi"><div class="l">매체 과대계상 배율</div><div class="v">${d.kpi.overReportRatio !== null ? fmtNum(d.kpi.overReportRatio, 2) + "배" : "-"}</div><div class="d">매체 보고 전환값 ÷ 실매출</div></div>
@@ -467,12 +541,14 @@ function renderDashboard(root, state, view) {
     .map(([k, v]) => `${badgeHtml(k)} <b style="font-size:12.5px;margin-right:14px">${v}</b>`).join("");
 
   const warnHtml = d.warnings.length ? `<div class="warn">⚠ 점검 필요: ${d.warnings.map((w) => `<b>${esc(w.code)}</b>(${esc(w.reason)})`).join(" · ")}</div>` : "";
+  const fatigueHtml = d.fatigueWarnings.length ? `<div class="warn" style="background:#fef2f2;border-color:#fca5a5;color:#991b1b">🔥 실ROAS 급락(소재 피로 의심): ${d.fatigueWarnings.map((w) => `<b>${esc(w.code)}</b>(${fmtNum(w.from, 2)}→${fmtNum(w.to, 2)})`).join(" · ")}</div>` : "";
 
   const tableRows = sorted.map((c) => `
     <tr>
-      <td class="l">${esc(c.code)}</td>
+      <td class="l">${creativeLabelHtml(c)}</td>
       <td class="l">${esc(c.media)}</td>
       <td>${fmtWon(c.spend)}</td>
+      <td>${fmtWon(c.revenue)}</td>
       <td>${c.mediaRoas === null ? "-" : fmtNum(c.mediaRoas, 2)}</td>
       <td>${fmtNum(c.inflow)}</td>
       <td>${c.inflowCost === null ? "-" : fmtWon(c.inflowCost)}</td>
@@ -480,14 +556,14 @@ function renderDashboard(root, state, view) {
       <td style="color:${c.realRoas < 1 ? "#dc2626" : "#059669"};font-weight:600">${fmtNum(c.realRoas, 2)}</td>
       <td>${fmtNum(c.inflowValue, 2)}</td>
       <td style="font-weight:700">${fmtNum(c.composite, 2)}</td>
-      <td>${badgeHtml(c.verdict)}</td>
+      <td>${badgeHtml(c.verdict)}${c.verified ? "" : ' <span style="font-size:10px;color:#94a3b8">미검증</span>'}${c.sampleLimited ? ' <span style="font-size:10px;color:#a16207">표본부족</span>' : ""}</td>
       <td class="why">${esc(c.reason)}</td>
       <td><b>${fmtWon(c.proposedBudget)}</b></td>
     </tr>`).join("");
 
   const reallocRows = [...visibleCreatives].sort((a, b) => a.rank - b.rank).map((c) => `
     <tr>
-      <td>${c.rank}</td><td class="l">${esc(c.code)}</td><td class="l">${esc(c.media)}</td>
+      <td>${c.rank}</td><td class="l">${creativeLabelHtml(c)}</td><td class="l">${esc(c.media)}</td>
       <td>${badgeHtml(c.verdict)}</td><td>${fmtNum(c.composite, 2)}</td>
       <td>${fmtWon(c.spend)}</td><td><b>${fmtWon(c.proposedBudget)}</b></td>
       <td style="color:${c.delta < 0 ? "#dc2626" : c.delta > 0 ? "#059669" : "#6b7688"};font-weight:600">${fmtWon(c.delta)} (${fmtPct(c.deltaPct)})</td>
@@ -506,6 +582,7 @@ function renderDashboard(root, state, view) {
     ${kpiHtml}
     <div style="margin:14px 0">${badgeSummary}</div>
     ${warnHtml}
+    ${fatigueHtml}
     <div class="card">
       <h2>일자별 추이 <span class="hint">선택 기간 내 매체 지출 vs UTM 실매출(귀속 매출)</span></h2>
       ${lineChartSvg(trend)}
@@ -515,11 +592,11 @@ function renderDashboard(root, state, view) {
       <div class="chartbox"><h3>매체별 지출 비중</h3>${donutChartSvg(d.mediaBreakdown)}</div>
     </div>
     <div class="card">
-      <h2>소재별 판정표 <span class="hint">열 제목 클릭으로 정렬 · 사이트 평균 유입당매출 ${fmtWon(d.kpi.siteAvgRevenuePerInflow)} 기준</span></h2>
+      <h2>소재별 판정표 <span class="hint">열 제목 클릭으로 정렬 · 사이트 평균 유입당매출 ${fmtWon(d.kpi.siteAvgRevenuePerInflow)} 기준 · "미검증"=아직 매출 미발생(유입가치로만 판단, 집중 불가)</span></h2>
       ${filterNote}
       <div style="overflow-x:auto"><table id="main-table"><thead><tr>
-        <th>소재</th><th>매체</th>
-        ${sortableTh("지출", "spend")}<th>매체ROAS</th>
+        <th>캠페인 › 세트 › 소재</th><th>매체</th>
+        ${sortableTh("지출", "spend")}${sortableTh("실매출", "revenue")}<th>매체ROAS</th>
         ${sortableTh("유입", "inflow")}${sortableTh("유입단가", "inflowCost")}
         <th>유입당매출</th>${sortableTh("실ROAS", "realRoas")}
         <th>유입가치</th>${sortableTh("종합", "composite")}
@@ -527,11 +604,12 @@ function renderDashboard(root, state, view) {
       </tr></thead><tbody>${tableRows}</tbody></table></div>
     </div>
     <div class="card">
-      <h2>🎯 선택과 집중 — 차주 예산 재배분 제안 <span class="hint">총예산 = 선택 기간 지출 유지 기준 · 상한 ${settings.rankCap}개 / 소재당 최대 +${settings.perCreativeCapPct}%</span></h2>
+      <h2>🎯 선택과 집중 — 차주 예산 재배분 제안 <span class="hint">총예산 = 선택 기간 지출 유지 기준 · 상한 ${settings.rankCap}개 / 소재당 최대 +${settings.perCreativeCapPct}% · 검증된 전환(집중) 우선 배분</span></h2>
       <div style="overflow-x:auto"><table><thead><tr>
-        <th>순위</th><th>소재</th><th>매체</th><th>판정</th><th>종합</th><th>현 지출</th><th>재배분 예산</th><th>증감</th><th>비고</th>
+        <th>순위</th><th>캠페인 › 세트 › 소재</th><th>매체</th><th>판정</th><th>종합</th><th>현 지출</th><th>재배분 예산</th><th>증감</th><th>비고</th>
       </tr></thead><tbody>${reallocRows}</tbody></table></div>
     </div>
+
     ${d.missingSpend.length ? `<div class="card">
       <h2>지출 데이터 미입력 소재 <span class="hint">UTM 성과는 있으나 매체 지출이 업로드되지 않음</span></h2>
       <table><thead><tr><th>소재</th><th>매체(추정)</th><th>유입</th><th>주문</th><th>매출</th></tr></thead><tbody>${missingRows}</tbody></table>
