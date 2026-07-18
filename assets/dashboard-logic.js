@@ -278,7 +278,94 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings) {
   };
 }
 
-/* ---------------- 렌더링 ---------------- */
+function rowKeyMeta(r) { return r.code + "|" + r.date; }
+function rowKeyUtm(r) { return (r.channel || "") + "|" + r.date + "|" + (r.campaign || "") + "|" + (r.content || ""); }
+
+// 기존 히스토리 + 새로 업로드한 데이터를 날짜+코드 기준으로 합칩니다.
+// 같은 날짜/소재가 다시 올라오면 최신 업로드 값으로 덮어씁니다 (중복 합산 방지).
+function mergeRows(existingRows, newRows, keyFn) {
+  const map = new Map();
+  for (const r of (existingRows || [])) map.set(keyFn(r), r);
+  for (const r of (newRows || [])) map.set(keyFn(r), r);
+  return [...map.values()];
+}
+
+function shiftDate(dateStr, days) {
+  const d = new Date(dateStr + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function daysBetween(a, b) {
+  return Math.round((new Date(b + "T00:00:00Z") - new Date(a + "T00:00:00Z")) / 86400000) + 1;
+}
+function previousPeriod(dateStart, dateEnd) {
+  const len = daysBetween(dateStart, dateEnd);
+  return [shiftDate(dateStart, -len), shiftDate(dateStart, -1)];
+}
+
+// 일자별 지출/실매출/유입 추이 (전체 매체 합산, ad-attributed 매출 기준)
+function computeDailyTrend(metaRows, utmRows, dateStart, dateEnd) {
+  const codeLike = /^\d{6,}/;
+  const byDate = new Map();
+  const ensure = (date) => {
+    if (!byDate.has(date)) byDate.set(date, { date, spend: 0, revenue: 0, inflow: 0 });
+    return byDate.get(date);
+  };
+  for (const r of metaRows) {
+    if (!inRange(r.date, dateStart, dateEnd)) continue;
+    ensure(r.date).spend += r.spend;
+  }
+  for (const r of utmRows) {
+    if (!inRange(r.date, dateStart, dateEnd)) continue;
+    if (r.channel && codeLike.test(r.channel)) {
+      const e = ensure(r.date);
+      e.revenue += r.orderAmount;
+      e.inflow += r.inflowCount;
+    }
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function lineChartSvg(trend) {
+  if (!trend.length) return '<div style="padding:30px;text-align:center;color:var(--sub);font-size:12.5px">해당 기간에 표시할 일자별 데이터가 없습니다</div>';
+  const w = 640, h = 220, padL = 60, padR = 20, padT = 16, padB = 26;
+  const maxV = Math.max(1, ...trend.map((t) => Math.max(t.spend, t.revenue)));
+  const xStep = (w - padL - padR) / Math.max(1, trend.length - 1);
+  const yScale = (v) => padT + (h - padT - padB) * (1 - v / maxV);
+  const xAt = (i) => padL + i * xStep;
+  const pathOf = (key) => trend.map((t, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(1)},${yScale(t[key]).toFixed(1)}`).join(" ");
+  const spendPath = pathOf("spend");
+  const revPath = pathOf("revenue");
+  const dots = (key, color) => trend.map((t, i) => `<circle cx="${xAt(i).toFixed(1)}" cy="${yScale(t[key]).toFixed(1)}" r="2.6" fill="${color}"><title>${t.date}: ${fmtWon(t[key])}</title></circle>`).join("");
+  const step = Math.ceil(trend.length / 8) || 1;
+  const xLabels = trend.map((t, i) => (i % step === 0 ? `<text x="${xAt(i).toFixed(1)}" y="${h - 6}" font-size="9.5" fill="#6b7688" text-anchor="middle">${t.date.slice(5)}</text>` : "")).join("");
+  const gridY = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const y = padT + (h - padT - padB) * (1 - f);
+    return `<line x1="${padL}" x2="${w - padR}" y1="${y}" y2="${y}" stroke="#eef1f6" stroke-width="1"></line><text x="${padL - 6}" y="${y + 3}" font-size="9" fill="#94a3b8" text-anchor="end">${(maxV * f / 10000).toFixed(0)}만</text>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-height:240px">
+    ${gridY}
+    <path d="${spendPath}" fill="none" stroke="#2563eb" stroke-width="2"></path>
+    <path d="${revPath}" fill="none" stroke="#059669" stroke-width="2"></path>
+    ${dots("spend", "#2563eb")}${dots("revenue", "#059669")}
+    ${xLabels}
+  </svg>
+  <div style="text-align:center;font-size:11px;margin-top:4px">
+    <span style="color:#2563eb">■ 지출</span> &nbsp; <span style="color:#059669">■ 실매출(UTM)</span>
+  </div>`;
+}
+
+function deltaHtml(cur, prev, opts) {
+  opts = opts || {};
+  if (prev === null || prev === undefined || prev === 0) return "";
+  const diff = cur - prev;
+  const pct = (diff / Math.abs(prev)) * 100;
+  const up = diff > 0;
+  const goodIsUp = opts.goodIsUp !== false;
+  const color = diff === 0 ? "#6b7688" : (up === goodIsUp ? "#059669" : "#dc2626");
+  const arrow = diff === 0 ? "–" : (up ? "▲" : "▼");
+  return `<div style="font-size:11px;color:${color};margin-top:3px">${arrow} ${Math.abs(pct).toFixed(1)}% vs 이전 기간</div>`;
+}
 
 function badgeHtml(kind) {
   const s = BADGE_STYLES[kind] || BADGE_STYLES.none;
@@ -328,18 +415,37 @@ function donutChartSvg(data) {
   </div>`;
 }
 
-function renderDashboard(root, state) {
-  const { metaRows, utmRows, settings, dateStart, dateEnd, uploader, savedAt } = state;
+function renderDashboard(root, state, view) {
+  const { metaRows, utmRows, settings, uploader, savedAt } = state;
   if (!metaRows || !utmRows) {
     root.innerHTML = `<div class="empty-state">아직 데이터가 없습니다. 관리자 페이지에서 데이터를 업로드해주세요.</div>`;
     return;
   }
+  view = view || {};
+  const dateStart = view.dateStart || state.dateStart;
+  const dateEnd = view.dateEnd || state.dateEnd;
+  const mediaFilter = view.mediaFilter || null;   // Set|null
+  const verdictFilter = view.verdictFilter || null; // Set|null
+  const compare = !!view.compare;
+
   const d = computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings);
+  const trend = computeDailyTrend(metaRows, utmRows, dateStart, dateEnd);
+
+  let cmp = null;
+  if (compare) {
+    const [pStart, pEnd] = previousPeriod(dateStart, dateEnd);
+    cmp = { range: [pStart, pEnd], d: computeDashboard(metaRows, utmRows, pStart, pEnd, settings) };
+  }
+
   root.dataset.sortKey = root.dataset.sortKey || "composite";
   root.dataset.sortDir = root.dataset.sortDir || "desc";
-
   const sortKey = root.dataset.sortKey, sortDir = root.dataset.sortDir;
-  const sorted = [...d.creatives].sort((a, b) => {
+
+  let visibleCreatives = d.creatives;
+  if (mediaFilter && mediaFilter.size) visibleCreatives = visibleCreatives.filter((c) => mediaFilter.has(c.media));
+  if (verdictFilter && verdictFilter.size) visibleCreatives = visibleCreatives.filter((c) => verdictFilter.has(c.verdict));
+
+  const sorted = [...visibleCreatives].sort((a, b) => {
     let av = a[sortKey], bv = b[sortKey];
     if (av === null || av === undefined) av = -Infinity;
     if (bv === null || bv === undefined) bv = -Infinity;
@@ -349,10 +455,10 @@ function renderDashboard(root, state) {
 
   const kpiHtml = `
     <div class="kpi-grid">
-      <div class="kpi"><div class="l">총 지출</div><div class="v">${fmtWon(d.kpi.totalSpend)}</div></div>
-      <div class="kpi"><div class="l">UTM 실매출</div><div class="v">${fmtWon(d.kpi.totalRevenue)}</div></div>
-      <div class="kpi"><div class="l">실ROAS</div><div class="v" style="color:${d.kpi.realRoasTotal < 1 ? "#dc2626" : "#059669"}">${fmtNum(d.kpi.realRoasTotal, 2)}</div></div>
-      <div class="kpi"><div class="l">총 유입 / 유입단가</div><div class="v">${fmtNum(d.kpi.totalInflow)} / ${fmtWon(d.kpi.inflowCostAvgTotal)}</div></div>
+      <div class="kpi"><div class="l">총 지출</div><div class="v">${fmtWon(d.kpi.totalSpend)}</div>${cmp ? deltaHtml(d.kpi.totalSpend, cmp.d.kpi.totalSpend, { goodIsUp: false }) : ""}</div>
+      <div class="kpi"><div class="l">UTM 실매출</div><div class="v">${fmtWon(d.kpi.totalRevenue)}</div>${cmp ? deltaHtml(d.kpi.totalRevenue, cmp.d.kpi.totalRevenue) : ""}</div>
+      <div class="kpi"><div class="l">실ROAS</div><div class="v" style="color:${d.kpi.realRoasTotal < 1 ? "#dc2626" : "#059669"}">${fmtNum(d.kpi.realRoasTotal, 2)}</div>${cmp ? deltaHtml(d.kpi.realRoasTotal, cmp.d.kpi.realRoasTotal) : ""}</div>
+      <div class="kpi"><div class="l">총 유입 / 유입단가</div><div class="v">${fmtNum(d.kpi.totalInflow)} / ${fmtWon(d.kpi.inflowCostAvgTotal)}</div>${cmp ? deltaHtml(d.kpi.totalInflow, cmp.d.kpi.totalInflow) : ""}</div>
       <div class="kpi"><div class="l">매체 과대계상 배율</div><div class="v">${d.kpi.overReportRatio !== null ? fmtNum(d.kpi.overReportRatio, 2) + "배" : "-"}</div><div class="d">매체 보고 전환값 ÷ 실매출</div></div>
       <div class="kpi"><div class="l">차주 제안 예산 합계</div><div class="v">${fmtWon(d.kpi.nextBudgetTotal)}</div><div class="d">현 지출 대비 ${fmtNum((d.kpi.nextBudgetTotal / d.kpi.totalSpend) * 100)}%</div></div>
     </div>`;
@@ -379,7 +485,7 @@ function renderDashboard(root, state) {
       <td><b>${fmtWon(c.proposedBudget)}</b></td>
     </tr>`).join("");
 
-  const reallocRows = [...d.creatives].sort((a, b) => a.rank - b.rank).map((c) => `
+  const reallocRows = [...visibleCreatives].sort((a, b) => a.rank - b.rank).map((c) => `
     <tr>
       <td>${c.rank}</td><td class="l">${esc(c.code)}</td><td class="l">${esc(c.media)}</td>
       <td>${badgeHtml(c.verdict)}</td><td>${fmtNum(c.composite, 2)}</td>
@@ -392,18 +498,25 @@ function renderDashboard(root, state) {
     <tr><td class="l">${esc(r.code)}</td><td class="l">${esc(r.media)}</td><td>${fmtNum(r.inflow)}</td><td>${fmtNum(r.orders)}</td><td>${fmtWon(r.revenue)}</td></tr>`).join("");
 
   const sortableTh = (label, key) => `<th data-sort="${key}" class="${sortKey === key ? "sorted-" + sortDir : ""}">${label}</th>`;
+  const filterNote = (mediaFilter && mediaFilter.size) || (verdictFilter && verdictFilter.size)
+    ? `<div class="note" style="margin-bottom:10px">필터 적용 중 — 아래 표는 ${visibleCreatives.length}개 소재만 표시 (순위·차주예산은 전체 ${d.creatives.length}개 기준 계산값)</div>` : "";
 
   root.innerHTML = `
-    <div class="report-meta">분석 기간 ${esc(dateStart)} ~ ${esc(dateEnd)}${uploader ? ` · 업로드: ${esc(uploader)}${savedAt ? ` (${new Date(savedAt).toLocaleString("ko-KR")})` : ""}` : ""}</div>
+    <div class="report-meta">분석 기간 ${esc(dateStart)} ~ ${esc(dateEnd)}${cmp ? ` · 비교 기간 ${esc(cmp.range[0])} ~ ${esc(cmp.range[1])}` : ""}${uploader ? ` · 최근 업로드: ${esc(uploader)}${savedAt ? ` (${new Date(savedAt).toLocaleString("ko-KR")})` : ""}` : ""}</div>
     ${kpiHtml}
     <div style="margin:14px 0">${badgeSummary}</div>
     ${warnHtml}
+    <div class="card">
+      <h2>일자별 추이 <span class="hint">선택 기간 내 매체 지출 vs UTM 실매출(귀속 매출)</span></h2>
+      ${lineChartSvg(trend)}
+    </div>
     <div class="charts">
       <div class="chartbox"><h3>지출 상위 소재: 지출 vs 실매출</h3>${barChartSvg(d.topSpendChart)}</div>
       <div class="chartbox"><h3>매체별 지출 비중</h3>${donutChartSvg(d.mediaBreakdown)}</div>
     </div>
     <div class="card">
       <h2>소재별 판정표 <span class="hint">열 제목 클릭으로 정렬 · 사이트 평균 유입당매출 ${fmtWon(d.kpi.siteAvgRevenuePerInflow)} 기준</span></h2>
+      ${filterNote}
       <div style="overflow-x:auto"><table id="main-table"><thead><tr>
         <th>소재</th><th>매체</th>
         ${sortableTh("지출", "spend")}<th>매체ROAS</th>
@@ -414,7 +527,7 @@ function renderDashboard(root, state) {
       </tr></thead><tbody>${tableRows}</tbody></table></div>
     </div>
     <div class="card">
-      <h2>🎯 선택과 집중 — 차주 예산 재배분 제안 <span class="hint">총예산 = 금주 지출 유지 기준 · 상한 ${settings.rankCap}개 / 소재당 최대 +${settings.perCreativeCapPct}%</span></h2>
+      <h2>🎯 선택과 집중 — 차주 예산 재배분 제안 <span class="hint">총예산 = 선택 기간 지출 유지 기준 · 상한 ${settings.rankCap}개 / 소재당 최대 +${settings.perCreativeCapPct}%</span></h2>
       <div style="overflow-x:auto"><table><thead><tr>
         <th>순위</th><th>소재</th><th>매체</th><th>판정</th><th>종합</th><th>현 지출</th><th>재배분 예산</th><th>증감</th><th>비고</th>
       </tr></thead><tbody>${reallocRows}</tbody></table></div>
@@ -430,7 +543,7 @@ function renderDashboard(root, state) {
       const key = th.dataset.sort;
       if (root.dataset.sortKey === key) root.dataset.sortDir = root.dataset.sortDir === "asc" ? "desc" : "asc";
       else { root.dataset.sortKey = key; root.dataset.sortDir = "desc"; }
-      renderDashboard(root, state);
+      renderDashboard(root, state, view);
     });
   });
 }
