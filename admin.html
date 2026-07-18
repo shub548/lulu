@@ -116,7 +116,7 @@ previewBtn.addEventListener("click", async () => {
     ]);
     // 기존 히스토리와 합치기 (같은 날짜/소재는 이번 업로드 값으로 덮어씀)
     const metaRows = mergeRows(existing ? existing.metaRows : [], newMetaRows, rowKeyMeta);
-    const utmRows = mergeRows(existing ? existing.utmRows : [], newUtmRows, rowKeyUtm);
+    const utmRows = mergeUtmRowsByPeriod(existing ? existing.utmRows : [], newUtmRows);
     const settings = (existing && existing.settings) || DEFAULT_SETTINGS;
 
     // 기본 보기 기간은 "이번에 새로 올린 파일의 기간"
