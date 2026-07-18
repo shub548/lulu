@@ -242,8 +242,8 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevM
     }
 
     // 모멘텀: 지난 기간에도 부진했는데 이번에도 부진하면 한 단계 격상 (2주 연속 부진 시 중단)
-    if (prevMap && prevMap.has(code)) {
-      const prev = prevMap.get(code);
+    if (prevMap && prevMap.has(c.code)) {
+      const prev = prevMap.get(c.code);
       if (verdict === "cut" && (prev.verdict === "cut" || prev.verdict === "stop")) {
         reasons.push(`지난 기간(${prev.verdict === "cut" ? "축소" : "중단"})에 이어 이번 기간도 부진 — 중단으로 격상`);
         verdict = "stop";
@@ -252,7 +252,7 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevM
       }
       // 피로도 경고: 실ROAS가 전기간 대비 크게 하락 (판정 자체는 바꾸지 않고 경고만)
       if (prev.realRoas > 0 && c.realRoas < prev.realRoas * (1 - settings.fatigueDropRatio) && (verdict === "focus" || verdict === "keep")) {
-        fatigueWarnings.push({ code, from: prev.realRoas, to: c.realRoas });
+        fatigueWarnings.push({ code: c.code, from: prev.realRoas, to: c.realRoas });
       }
     }
 
