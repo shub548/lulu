@@ -84,6 +84,7 @@ async function parseMetaFile(file) {
     spend: Number(r["지출 금액 (KRW)"]) || 0,
     purchases: Number(r["구매"]) || 0,
     purchaseValue: Number(r["구매 전환값"]) || 0,
+    deliveryStatus: r["광고 게재"] ? String(r["광고 게재"]).trim().toLowerCase() : null,
   })).filter((r) => r.code);
 }
 
@@ -143,14 +144,15 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevM
 
   const metaAgg = new Map();
   for (const r of metaInRange) {
-    const cur = metaAgg.get(r.code) || { spend: 0, purchases: 0, purchaseValue: 0, adName: r.adName, campaign: r.campaign, adset: r.adset };
+    const cur = metaAgg.get(r.code) || { spend: 0, purchases: 0, purchaseValue: 0, adName: r.adName, campaign: r.campaign, adset: r.adset, deliveryStatus: r.deliveryStatus };
     cur.spend += r.spend;
     cur.purchases += r.purchases;
     cur.purchaseValue += r.purchaseValue;
-    // 최신 행의 이름/캠페인/세트 정보로 갱신 (기간 내 마지막 값 사용)
+    // 최신 행의 이름/캠페인/세트/게재상태 정보로 갱신 (기간 내 마지막 값 사용 — 최근에 껐으면 반영)
     cur.adName = r.adName || cur.adName;
     cur.campaign = r.campaign || cur.campaign;
     cur.adset = r.adset || cur.adset;
+    if (r.deliveryStatus) cur.deliveryStatus = r.deliveryStatus;
     metaAgg.set(r.code, cur);
   }
 
@@ -198,6 +200,7 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevM
     const cpa = orders > 0 ? spend / orders : null;
     creatives.push({
       code, adName: m.adName, campaign: m.campaign, adset: m.adset, media: classifyMedia(code),
+      deliveryStatus: m.deliveryStatus,
       spend, mediaRoas, inflow, inflowCost, revenuePerInflow, revenue, realRoas, inflowValue,
       composite, orders, cpa, verified,
     });
@@ -372,8 +375,14 @@ function spansOverlap(s1, e1, s2, e2) {
 }
 
 // UTM 데이터 전용 병합: 날짜 표기 형식(일자별 vs 기간집계)이 다른 파일끼리 겹치는 기간을 올릴 때
-// 같은 매출이 이중으로 쌓이는 걸 막기 위해, 새로 올라온 파일이 커버하는 기간과 겹치는 기존 행은
-// 전부 제거하고 새 데이터로 통째로 교체합니다 (행 단위 키 매칭 대신 "기간 단위 교체").
+// 같은 매출이 이중으로 쌓이는 걸 막기 위해, 새로 올라온 파일이 "완전히 포함하는" 기존 행만
+// 제거하고 새 데이터로 교체합니다 (행 단위 키 매칭 대신 "기간 단위 교체").
+// [2026-07-20 수정] 기존에는 "겹치기만 하면" 삭제해서, 큰 기간집계 행(예: 7/1~7/18)이
+// 작은 신규 업로드(예: 7/17~7/19)와 부분적으로만 겹쳐도 통째로 사라져 7/1~7/16 매출이
+// 유실되는 사고가 있었음. 이제는 기존 행의 기간이 새 업로드 기간 안에 "완전히 포함될 때만"
+// 삭제하도록 바꿔서, 부분 겹침 시에는 안전하게 기존 데이터를 보존한다(대신 정확한 중복 제거를
+// 위해서는 업로드 시 완전히 같은 기간 단위로 맞춰서 올리는 걸 권장 — 부분 겹침이 감지되면
+// 콘솔에 경고를 남긴다).
 function mergeUtmRowsByPeriod(existingRows, newRows) {
   if (!newRows || !newRows.length) return existingRows || [];
   let newStart = null, newEnd = null;
@@ -383,10 +392,22 @@ function mergeUtmRowsByPeriod(existingRows, newRows) {
     if (newStart === null || s < newStart) newStart = s;
     if (newEnd === null || e > newEnd) newEnd = e;
   }
-  const survivors = (existingRows || []).filter((r) => {
+  const survivors = [];
+  for (const r of (existingRows || [])) {
     const [s, e] = parseDateSpan(r.date);
-    return !spansOverlap(s, e, newStart, newEnd);
-  });
+    const fullyContained = s && e && s >= newStart && e <= newEnd;
+    const partiallyOverlaps = !fullyContained && spansOverlap(s, e, newStart, newEnd);
+    if (partiallyOverlaps) {
+      console.warn(
+        `[mergeUtmRowsByPeriod] 부분 겹침 감지: 기존 행 기간(${s}~${e})이 신규 업로드 기간(${newStart}~${newEnd})과 ` +
+        `일부만 겹칩니다. 데이터 유실을 막기 위해 이 행은 삭제하지 않고 보존합니다. 중복 계산 여부를 수동으로 확인해주세요.`,
+        r
+      );
+      survivors.push(r);
+      continue;
+    }
+    if (!fullyContained) survivors.push(r);
+  }
   return [...survivors, ...newRows];
 }
 
@@ -515,13 +536,26 @@ function donutChartSvg(data) {
   </div>`;
 }
 
+function deliveryStatusHtml(status) {
+  // 메타 "광고 게재" 값: active(게재중) / inactive(꺼짐) / not_delivering 등. 값이 없으면 표시 안 함.
+  if (!status) return "";
+  const isActive = status === "active";
+  const isInactive = status === "inactive" || status === "not_delivering" || status === "paused";
+  const label = isActive ? "게재중" : isInactive ? "꺼짐" : esc(status);
+  const color = isActive ? "#059669" : isInactive ? "#94a3b8" : "#a16207";
+  const bg = isActive ? "#ecfdf5" : isInactive ? "#f1f5f9" : "#fef9c3";
+  return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:${color};background:${bg};border-radius:999px;padding:1px 7px;margin-left:6px;white-space:nowrap">
+    <span style="width:6px;height:6px;border-radius:50%;background:${color};display:inline-block"></span>${label}
+  </span>`;
+}
+
 function creativeLabelHtml(c) {
   const campaign = c.campaign ? esc(c.campaign) : "";
   const adset = c.adset ? esc(c.adset) : "";
   const name = c.adName ? esc(c.adName) : esc(c.code);
   return `<div style="line-height:1.4">
     ${campaign || adset ? `<div style="font-size:10px;color:#94a3b8">${campaign}${campaign && adset ? " › " : ""}${adset}</div>` : ""}
-    <div style="font-weight:600">${name}</div>
+    <div style="font-weight:600">${name}${deliveryStatusHtml(c.deliveryStatus)}</div>
   </div>`;
 }
 
