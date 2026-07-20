@@ -4,7 +4,7 @@ body{font-family:'Segoe UI','Malgun Gothic',sans-serif;background:var(--bg);colo
 header{background:#0f1b33;color:#fff;padding:16px 28px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;}
 header h1{font-size:18px;font-weight:700;}
 header .sub{color:#9fb0d0;font-size:12px;}
-main{max-width:1280px;margin:0 auto;padding:24px 28px 60px;}
+main{max-width:1680px;margin:0 auto;padding:24px 28px 60px;}
 .report-meta{color:var(--sub);font-size:12px;margin-bottom:14px;}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:18px;}
 .card h2{font-size:15px;margin-bottom:14px;}
@@ -29,7 +29,7 @@ tr:hover td{background:#f8fafd;}
 @media(max-width:900px){.charts{grid-template-columns:1fr;}}
 .chartbox{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;overflow-x:auto;}
 .chartbox h3{font-size:13px;font-weight:600;margin-bottom:8px;text-align:center;}
-td.why{text-align:left;white-space:normal;min-width:200px;max-width:280px;font-size:11.5px;color:var(--sub);line-height:1.45;}
+td.why{text-align:left;white-space:normal;min-width:260px;max-width:400px;font-size:11.5px;color:var(--sub);line-height:1.45;}
 .empty-state{text-align:center;color:var(--sub);padding:60px 20px;background:var(--card);border:2px dashed #b6c3da;border-radius:12px;}
 button.pri{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:13.5px;font-weight:600;cursor:pointer;}
 button.pri:disabled{background:#b6c3da;cursor:not-allowed;}
