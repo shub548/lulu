@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>룰루피치 대시보드 — 데이터 업로드</title>
-<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/style.css?v=2">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 </head>
@@ -28,17 +28,17 @@
 
     <div class="field">
       <label>① 메타 광고 리포트 (.xlsx)</label>
-      <div class="drop" id="dropMeta">파일을 드래그하거나 클릭해서 선택</div>
+      <div class="drop" id="dropMeta">소재단위에서 일자별>xlsx로 내보내기, 파일을 드래그하거나 클릭해서 선택</div>
       <input type="file" id="fileMeta" accept=".xlsx,.xls" style="display:none">
     </div>
     <div class="field">
       <label>② 카페24 UTM 실매출 (.csv)</label>
-      <div class="drop" id="dropUtm">파일을 드래그하거나 클릭해서 선택</div>
+      <div class="drop" id="dropUtm">애널리틱스>광고유입 상세분석, 조회기간 일 단위. 파일을 드래그하거나 클릭해서 선택</div>
       <input type="file" id="fileUtm" accept=".csv" style="display:none">
     </div>
     <div class="field">
       <label>업로드한 사람</label>
-      <input type="text" id="uploaderInput" placeholder="예: 김일수">
+      <input type="text" id="uploaderInput" placeholder="예: 오수빈">
     </div>
 
     <div style="display:flex;gap:8px">
@@ -51,7 +51,7 @@
   <div id="previewRoot" style="margin-top:24px"></div>
 </main>
 
-<script src="assets/dashboard-logic.js?v=4"></script>
+<script src="assets/dashboard-logic.js?v=5"></script>
 <script>
 const REPO = "shub548/lulu";
 const BRANCH = "main";
