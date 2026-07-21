@@ -355,10 +355,35 @@ function computeDashboard(metaRows, utmRows, dateStart, dateEnd, settings, prevM
 function rowKeyMeta(r) { return r.code + "|" + r.date; }
 
 // 메타(지출) 데이터 병합: 날짜가 항상 명확한 일자 단위라 코드+날짜 키로 정확히 매칭/교체 가능
+// [2026-07-20 수정] "광고 이름"에서 첫 '_' 앞부분만 코드로 쓰다 보니, 같은 코드인데 뒤에 _TEST,
+// _ASC 같은 접미사가 붙은 서로 다른 광고(같은 소재코드로 UTM 매칭되도록 의도된 변형들)가
+// 하나의 파일 안에 여러 줄로 들어올 수 있음. 기존에는 이런 경우 code+date 키가 겹쳐서
+// 나중 행이 앞 행을 그냥 덮어써 지출이 통째로 사라졌음. 이제는 새로 올라온 파일 안에서
+// 같은 키를 가진 행들을 먼저 지출/구매/구매전환값 기준으로 합산한 뒤, 그 결과로 기존 데이터를
+// 교체(재업로드 시 안전하게 덮어쓰기)한다.
 function mergeRows(existingRows, newRows, keyFn) {
+  const combinedNew = new Map();
+  for (const r of (newRows || [])) {
+    const k = keyFn(r);
+    const prev = combinedNew.get(k);
+    if (!prev) {
+      combinedNew.set(k, { ...r });
+    } else {
+      prev.spend = (prev.spend || 0) + (r.spend || 0);
+      prev.purchases = (prev.purchases || 0) + (r.purchases || 0);
+      prev.purchaseValue = (prev.purchaseValue || 0) + (r.purchaseValue || 0);
+      if (r.adName && prev.adName && r.adName !== prev.adName && !prev.adName.includes("외 변형 포함")) {
+        prev.adName = prev.adName + " 외 변형 포함";
+      }
+      // 게재상태는 여러 변형 중 하나라도 게재중이면 게재중으로 표시
+      if (r.deliveryStatus === "active") prev.deliveryStatus = "active";
+      else if (!prev.deliveryStatus) prev.deliveryStatus = r.deliveryStatus;
+      console.warn(`[mergeRows] 소재코드 "${k}" 중복 감지 — 지출/구매를 합산합니다 (변형 광고 다중 매칭 추정).`, r);
+    }
+  }
   const map = new Map();
   for (const r of (existingRows || [])) map.set(keyFn(r), r);
-  for (const r of (newRows || [])) map.set(keyFn(r), r);
+  for (const r of combinedNew.values()) map.set(keyFn(r), r);
   return [...map.values()];
 }
 
