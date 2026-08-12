@@ -88,14 +88,27 @@ async function parseMetaFile(file) {
   })).filter((r) => r.code);
 }
 
+// 카페24 UTM CSV는 내보내기 설정에 따라 영문 헤더(date,channel,order_amount...) 또는
+// 한글 헤더(날짜,채널,매출액...)로 올 수 있어서, 둘 다 같은 내부 키로 정규화합니다.
+const UTM_HEADER_MAP = {
+  "날짜": "date", "채널": "channel", "유형": "medium", "캠페인": "campaign",
+  "세부항목": "content", "키워드": "term", "매출액": "order_amount",
+  "배송비": "order_delivery_fee", "구매건수": "order_count", "유입수": "inflow_count",
+  "구매전환율": "purchase_rate", "구매당 매출": "order_amount_per_order",
+  "유입당 매출": "order_amount_per_inflow",
+};
+
 function parseUtmFile(file) {
   return new Promise((resolve, reject) => {
     Papa.parse(file, {
       header: true,
       dynamicTyping: true,
       skipEmptyLines: true,
-      // 카페24 CSV 앞에 붙는 BOM(﻿) 문자 때문에 "date" 컬럼명이 깨지는 문제 방지
-      transformHeader: (h) => h.replace(/^\uFEFF/, "").trim(),
+      transformHeader: (h) => {
+        // 카페24 CSV 앞에 붙는 BOM(﻿) 문자 때문에 헤더가 깨지는 문제 방지
+        const clean = h.replace(/^\uFEFF/, "").trim();
+        return UTM_HEADER_MAP[clean] || clean;
+      },
       complete: (res) => {
         resolve(res.data.map((r) => ({
           date: r.date,
